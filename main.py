@@ -13,9 +13,6 @@ rfmModule = RFM69_POCSAG.RFM69_POCSAG(RF69_433MHZ, pocsagBaudRate=1200, isRFM69H
 
 print "Performing rcCalibration"
 
-rfmModule.writeReg(REG_FDEVMSB, 0x00)
-rfmModule.writeReg(REG_FDEVLSB, 0x4a)
-
 freqHz = 434790000
 freqHz /= 61.03515625 # divide down by FSTEP to get FRF
 freqHz = int(freqHz) + 35 # offset per chip (you may have to calibrate)
