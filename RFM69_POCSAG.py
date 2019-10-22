@@ -216,6 +216,7 @@ class RFM69_POCSAG(object):
     def readReg(self, addr):
         return self.spi.xfer([addr & 0x7F, 0])[1]
     def writeReg(self, addr, value):
+        self.spi.xfer([addr | 0x80, value])
     def setHighPower(self, onOff):
         if onOff:
             self.writeReg(REG_OCP, RF_OCP_OFF)
