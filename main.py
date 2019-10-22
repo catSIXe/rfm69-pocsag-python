@@ -8,7 +8,7 @@ from ConfigParser import SafeConfigParser
 
 config = SafeConfigParser()
 
-rfmModule = RFM69_POCSAG.RFM69_POCSAG(RF69_433MHZ, pocsagBaudRate=1200, True)
+rfmModule = RFM69_POCSAG.RFM69_POCSAG(RF69_433MHZ, pocsagBaudRate=1200, isRFM69HW = True)
 #rfmModule.shutdown()
 
 print "Performing rcCalibration"
