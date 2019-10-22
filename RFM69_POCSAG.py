@@ -1,6 +1,6 @@
 #!/usr/bin/env python2
 
-from RFM69registers import *
+from RFM69_POCSAGregisters import *
 import spidev
 import RPi.GPIO as GPIO
 import time
@@ -8,12 +8,12 @@ import time
 def chunks(l, n):
     n = max(1, n)
     return (l[i:i+n] for i in xrange(0, len(l), n))
-class RFM69(object):
-    def __init__(self, freqBand, nodeID, networkID, isRFM69HW = False, intPin = 18, rstPin = 29, spiBus = 0, spiDevice = 0):
+
+class RFM69_POCSAG(object):
+    def __init__(self, freqBand, pocsagBaudRate = 1200, isRFM69HW = False, intPin = 18, rstPin = 29, spiBus = 0, spiDevice = 0):
 
         self.freqBand = freqBand
-        self.address = nodeID
-        self.networkID = networkID
+        self.pocsagBaudRate = pocsagBaudRate
         self.isRFM69HW = isRFM69HW
         self.intPin = intPin
         self.rstPin = rstPin
@@ -21,14 +21,8 @@ class RFM69(object):
         self.spiDevice = spiDevice
         self.intLock = False
         self.mode = ""
-        self.promiscuousMode = False
         self.DATASENT = False
         self.DATALEN = 0
-        self.SENDERID = 0
-        self.TARGETID = 0
-        self.PAYLOADLEN = 0
-        self.ACK_REQUESTED = 0
-        self.ACK_RECEIVED = 0
         self.RSSI = 0
         self.DATA = []
         self.sendSleepTime = 0.05
@@ -44,16 +38,17 @@ class RFM69(object):
         frfLSB = {RF69_315MHZ: RF_FRFLSB_315, RF69_433MHZ: RF_FRFLSB_433,
                   RF69_868MHZ: RF_FRFLSB_868, RF69_915MHZ: RF_FRFLSB_915}
 
+        brMSB = { 512: 0xF4, 1200: RF_BITRATEMSB_1200, 2400: RF_BITRATEMSB_2400 }
+        brLSB = { 512: 0xF4, 1200: RF_BITRATELSB_1200, 2400: RF_BITRATELSB_2400 }
+
         self.CONFIG = {
           0x01: [REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTEN_OFF | RF_OPMODE_STANDBY],
           #no shaping
           0x02: [REG_DATAMODUL, RF_DATAMODUL_DATAMODE_PACKET | RF_DATAMODUL_MODULATIONTYPE_FSK | RF_DATAMODUL_MODULATIONSHAPING_00],
-          #default:4.8 KBPS
-          0x03: [REG_BITRATEMSB, RF_BITRATEMSB_1200],
-          0x04: [REG_BITRATELSB, RF_BITRATELSB_1200],
-          #default:5khz, (FDEV + BitRate/2 <= 500Khz)
-          0x05: [REG_FDEVMSB, RF_FDEVMSB_50000],
-          0x06: [REG_FDEVLSB, RF_FDEVLSB_50000],
+          0x03: [REG_BITRATEMSB, brMSB[self.pocsagBaudRate]],
+          0x04: [REG_BITRATELSB, brLSB[self.pocsagBaudRate]],
+          0x05: [REG_FDEVMSB, 0x00], # 4.5KHz for POCSAG
+          0x06: [REG_FDEVLSB, 0x4a],
 
           0x07: [REG_FRFMSB, frfMSB[freqBand]],
           0x08: [REG_FRFMID, frfMID[freqBand]],
@@ -79,9 +74,9 @@ class RFM69(object):
           #/* 0x2d */ { REG_PREAMBLELSB, RF_PREAMBLESIZE_LSB_VALUE } // default 3 preamble bytes 0xAAAAAA
           0x2e: [REG_SYNCCONFIG, RF_SYNC_ON | RF_SYNC_FIFOFILL_AUTO | RF_SYNC_SIZE_2 | RF_SYNC_TOL_0],
           #attempt to make this compatible with sync1 byte of RFM12B lib
-          0x2f: [REG_SYNCVALUE1, 0x2D],
+          0x2f: [REG_SYNCVALUE1, 0x00],
           #NETWORK ID
-          0x30: [REG_SYNCVALUE2, networkID],
+          0x30: [REG_SYNCVALUE2, 0x00],
           0x37: [REG_PACKETCONFIG1, RF_PACKET1_FORMAT_VARIABLE | RF_PACKET1_DCFREE_OFF |
                 RF_PACKET1_CRC_ON | RF_PACKET1_CRCAUTOCLEAR_ON | RF_PACKET1_ADRSFILTERING_OFF],
           #in variable length mode: the max frame size, not used in TX
@@ -98,6 +93,11 @@ class RFM69(object):
           0x00: [255, 0]
         }
 
+        #rfmModule.writeReg(REG_OPMODE, RF_OPMODE_SEQUENCER_ON | RF_OPMODE_LISTEN_OFF | RF_OPMODE_TRANSMITTER)
+        #rfmModule.writeReg(REG_DATAMODUL, RF_DATAMODUL_DATAMODE_PACKET | RF_DATAMODUL_MODULATIONSHAPING_00)
+        #self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00)
+        #self.writeReg(REG_DIOMAPPING2, RF_DIOMAPPING2_CLKOUT_OFF)
+
         #initialize SPI
         self.spi = spidev.SpiDev()
         self.spi.open(self.spiBus, self.spiDevice)
@@ -107,7 +107,7 @@ class RFM69(object):
         GPIO.output(self.rstPin, GPIO.HIGH);
         time.sleep(0.5)
         GPIO.output(self.rstPin, GPIO.LOW);
-        time.sleep(0.5)
+        time.sleep(0.1)
 
         #verify chip is syncing?
         while self.readReg(REG_SYNCVALUE1) != 0xAA:
@@ -120,7 +120,12 @@ class RFM69(object):
         for value in self.CONFIG.values():
             self.writeReg(value[0], value[1])
 
-        self.encrypt(0)
+        #pocsag specific
+        self.writeReg(REG_PACKETCONFIG1, RF_PACKET1_FORMAT_FIXED | RF_PACKET1_DCFREE_OFF | RF_PACKET1_CRC_OFF | RF_PACKET1_CRCAUTOCLEAR_ON | RF_PACKET1_ADRSFILTERING_OFF)
+        self.writeReg(REG_PAYLOADLENGTH, 0x00)
+        self.writeReg(REG_FIFOTHRESH, RF_FIFOTHRESH_TXSTART_FIFONOTEMPTY | RF_FIFOTHRESH_VALUE)
+        self.writeReg(REG_PREAMBLELSB, 0x00)
+        self.writeReg(REG_IRQFLAGS2, RF_IRQFLAGS2_FIFOOVERRUN)
         self.setHighPower(self.isRFM69HW)
         # Wait for ModeReady
         while (self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00:
@@ -133,7 +138,6 @@ class RFM69(object):
         self.writeReg(REG_FRFMSB, FRF >> 16)
         self.writeReg(REG_FRFMID, FRF >> 8)
         self.writeReg(REG_FRFLSB, FRF)
-
     def setMode(self, newMode):
         if newMode == self.mode:
             return
@@ -161,72 +165,20 @@ class RFM69(object):
             pass
 
         self.mode = newMode;
-
     def sleep(self):
         self.setMode(RF69_MODE_SLEEP)
-
-    def setAddress(self, addr):
-        self.address = addr
-        self.writeReg(REG_NODEADRS, self.address)
-
-    def setNetwork(self, networkID):
-        self.networkID = networkID
-        self.writeReg(REG_SYNCVALUE2, networkID)
-
+    def setBaudRate(self, baudRate):
+        brMSB = { 512: 0xF4, 1200: RF_BITRATEMSB_1200, 2400: RF_BITRATEMSB_2400 }
+        brLSB = { 512: 0xF4, 1200: RF_BITRATELSB_1200, 2400: RF_BITRATELSB_2400 }
+        self.pocsagBaudRate = baudRate
+        self.writeReg(REG_BITRATEMSB, brMSB[self.pocsagBaudRate])
+        self.writeReg(REG_BITRATELSB, brLSB[self.pocsagBaudRate])
     def setPowerLevel(self, powerLevel):
         if powerLevel > 31:
             powerLevel = 31
         self.powerLevel = powerLevel
         self.writeReg(REG_PALEVEL, (self.readReg(REG_PALEVEL) & 0xE0) | self.powerLevel)
-
-    def canSend(self):
-        if self.mode == RF69_MODE_STANDBY:
-            self.receiveBegin()
-            return True
-        #if signal stronger than -100dBm is detected assume channel activity
-        elif self.mode == RF69_MODE_RX and self.PAYLOADLEN == 0 and self.readRSSI() < CSMA_LIMIT:
-            self.setMode(RF69_MODE_STANDBY)
-            return True
-        return False
-
-    def send(self, toAddress, buff = "", requestACK = False):
-        self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
-        now = time.time()
-        while (not self.canSend()) and time.time() - now < RF69_CSMA_LIMIT_S:
-            self.receiveDone()
-        self.sendFrame(toAddress, buff, requestACK, False)
-
-#    to increase the chance of getting a packet across, call this function instead of send
-#    and it handles all the ACK requesting/retrying for you :)
-#    The only twist is that you have to manually listen to ACK requests on the other side and send back the ACKs
-#    The reason for the semi-automaton is that the lib is ingterrupt driven and
-#    requires user action to read the received data and decide what to do with it
-#    replies usually take only 5-8ms at 50kbps@915Mhz
-
-    def sendWithRetry(self, toAddress, buff = "", retries = 3, retryWaitTime = 10):
-        for i in range(0, retries):
-            self.send(toAddress, buff, True)
-            sentTime = time.time()
-            while (time.time() - sentTime) * 1000 < retryWaitTime:
-                if self.ACKReceived(toAddress):
-                    return True
-        return False
-
-    def ACKReceived(self, fromNodeID):
-        if self.receiveDone():
-            return (self.SENDERID == fromNodeID or fromNodeID == RF69_BROADCAST_ADDR) and self.ACK_RECEIVED
-        return False
-
-    def ACKRequested(self):
-        return self.ACK_REQUESTED and self.TARGETID != RF69_BROADCAST_ADDR
-
-    def sendACK(self, toAddress = 0, buff = ""):
-        toAddress = toAddress if toAddress > 0 else self.SENDERID
-        while not self.canSend():
-            self.receiveDone()
-        self.sendFrame(toAddress, buff, False, True)
     def sendBuffer(self, buff):
-        #turn off receiver to prevent reception while filling fifo
         self.setMode(RF69_MODE_STANDBY)
         #wait for modeReady
         while (self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00:
@@ -235,10 +187,7 @@ class RFM69(object):
         self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00)
 
         transmitChunks = chunks(buff, 30)
-        """if (len(firstBuff) > RF69_MAX_DATA_LEN):
-            leftOverBuff = firstBuff[RF69_MAX_DATA_LEN:]
-            firstBuff = firstBuff[0:RF69_MAX_DATA_LEN]
-            leftOverChunks = chunks(leftOverBuff, 30)"""
+
         self.spi.xfer2([REG_FIFO | 0x80] + transmitChunks.next())
         self.DATASENT = False
         self.setMode(RF69_MODE_TX)
@@ -260,107 +209,13 @@ class RFM69(object):
             if slept > 1.0:
                 break
         self.setMode(RF69_MODE_RX)
-    def sendFrame(self, toAddress, buff, requestACK, sendACK):
-        #turn off receiver to prevent reception while filling fifo
-        self.setMode(RF69_MODE_STANDBY)
-        #wait for modeReady
-        while (self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_MODEREADY) == 0x00:
-            pass
-        # DIO0 is "Packet Sent"
-        self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_00)
-
-        len = 0
-        buflen = 0
-
-
-        if (len(buff) > RF69_MAX_DATA_LEN):
-            buff = buff[0:RF69_MAX_DATA_LEN]
-
-        ack = 0
-        if sendACK:
-            ack = 0x80
-        elif requestACK:
-            ack = 0x40
-        if isinstance(buff, basestring):
-            self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + [int(ord(i)) for i in list(buff)])
-        else:
-            self.spi.xfer2([REG_FIFO | 0x80, len(buff) + 3, toAddress, self.address, ack] + buff)
-
-        self.DATASENT = False
-        self.setMode(RF69_MODE_TX)
-        slept = 0
-        while not self.DATASENT:
-            time.sleep(self.sendSleepTime)
-            slept += self.sendSleepTime
-            if slept > 1.0:
-                break
-        self.setMode(RF69_MODE_RX)
     def interruptHandler(self, pin):
         self.intLock = True
         self.DATASENT = True
-        
         self.intLock = False
-
-    def receiveBegin(self):
-
-        while self.intLock:
-            time.sleep(.1)
-        self.DATALEN = 0
-        self.SENDERID = 0
-        self.TARGETID = 0
-        self.PAYLOADLEN = 0
-        self.ACK_REQUESTED = 0
-        self.ACK_RECEIVED = 0
-        self.RSSI = 0
-        if (self.readReg(REG_IRQFLAGS2) & RF_IRQFLAGS2_PAYLOADREADY):
-            # avoid RX deadlocks
-            self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
-        #set DIO0 to "PAYLOADREADY" in receive mode
-        self.writeReg(REG_DIOMAPPING1, RF_DIOMAPPING1_DIO0_01)
-        self.setMode(RF69_MODE_RX)
-
-    def receiveDone(self):
-        if (self.mode == RF69_MODE_RX or self.mode == RF69_MODE_STANDBY) and self.PAYLOADLEN > 0:
-            self.setMode(RF69_MODE_STANDBY)
-            return True
-        if self.readReg(REG_IRQFLAGS1) & RF_IRQFLAGS1_TIMEOUT:
-            # https://github.com/russss/rfm69-python/blob/master/rfm69/rfm69.py#L112
-            # Russss figured out that if you leave alone long enough it times out
-            # tell it to stop being silly and listen for more packets
-            self.writeReg(REG_PACKETCONFIG2, (self.readReg(REG_PACKETCONFIG2) & 0xFB) | RF_PACKET2_RXRESTART)
-        elif self.mode == RF69_MODE_RX:
-            # already in RX no payload yet
-            return False
-        self.receiveBegin()
-        return False
-
-    def readRSSI(self, forceTrigger = False):
-        rssi = 0
-        if forceTrigger:
-            self.writeReg(REG_RSSICONFIG, RF_RSSI_START)
-            while self.readReg(REG_RSSICONFIG) & RF_RSSI_DONE == 0x00:
-                pass
-        rssi = self.readReg(REG_RSSIVALUE) * -1
-        rssi = rssi >> 1
-        return rssi
-
-    def encrypt(self, key):
-        self.setMode(RF69_MODE_STANDBY)
-        if key != 0 and len(key) == 16:
-            self.spi.xfer([REG_AESKEY1 | 0x80] + [int(ord(i)) for i in list(key)])
-            self.writeReg(REG_PACKETCONFIG2,(self.readReg(REG_PACKETCONFIG2) & 0xFE) | RF_PACKET2_AES_ON)
-        else:
-            self.writeReg(REG_PACKETCONFIG2,(self.readReg(REG_PACKETCONFIG2) & 0xFE) | RF_PACKET2_AES_OFF)
-
     def readReg(self, addr):
         return self.spi.xfer([addr & 0x7F, 0])[1]
-
     def writeReg(self, addr, value):
-        self.spi.xfer([addr | 0x80, value])
-
-    def promiscuous(self, onOff):
-        self.promiscuousMode = onOff
-
     def setHighPower(self, onOff):
         if onOff:
             self.writeReg(REG_OCP, RF_OCP_OFF)
@@ -370,7 +225,6 @@ class RFM69(object):
             self.writeReg(REG_OCP, RF_OCP_ON)
             #enable P0 only
             self.writeReg(REG_PALEVEL, RF_PALEVEL_PA0_ON | RF_PALEVEL_PA1_OFF | RF_PALEVEL_PA2_OFF | powerLevel)
-
     def setHighPowerRegs(self, onOff):
         if onOff:
             self.writeReg(REG_TESTPA1, 0x5D)
@@ -378,13 +232,11 @@ class RFM69(object):
         else:
             self.writeReg(REG_TESTPA1, 0x55)
             self.writeReg(REG_TESTPA2, 0x70)
-
     def readAllRegs(self):
         results = []
         for address in range(1, 0x50):
             results.append([str(hex(address)), str(bin(self.readReg(address)))])
         return results
-
     def readTemperature(self, calFactor):
         self.setMode(RF69_MODE_STANDBY)
         self.writeReg(REG_TEMP1, RF_TEMP1_MEAS_START)
@@ -393,13 +245,10 @@ class RFM69(object):
         # COURSE_TEMP_COEF puts reading in the ballpark, user can add additional correction
         #'complement'corrects the slope, rising temp = rising val
         return (int(~self.readReg(REG_TEMP2)) * -1) + COURSE_TEMP_COEF + calFactor
-
-
     def rcCalibration(self):
         self.writeReg(REG_OSC1, RF_OSC1_RCCAL_START)
         while self.readReg(REG_OSC1) & RF_OSC1_RCCAL_DONE == 0x00:
             pass
-
     def shutdown(self):
         self.setHighPower(False)
         self.sleep()
