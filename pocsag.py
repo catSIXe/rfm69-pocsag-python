@@ -24,7 +24,7 @@ BATCH_SIZE = 16
 #The preamble comes before a message, is a series of alternating
 #1,0,1,0... bits, at least 576 bits. It exists to allow the receiver
 #to synchronize with the transmitter
-PREAMBLE_LENGTH = 576
+PREAMBLE_LENGTH = 576*3
 
 #These bits appear as the first bit of a word, for an address word and
 #one for a data word
