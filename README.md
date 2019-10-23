@@ -1,13 +1,14 @@
 # rfm69-pocsag-python
 transmits POCSAG Messages with an RFM69 Module
-### Infrastructure:
+## Infrastructure:
 ![](doc/rabbitmq-users.jpg?raw=true)
-  Producer(s) => rabbitMQ => Gateway(s)
-  
-  rabbitMQ Format (address, message):
-   `["3D", "Text"]`
+
+Producer(s) => rabbitMQ => Gateway(s)
+
+rabbitMQ Format (address, message): 
+`["3D", "Text"]`
    
-### config.ini:
+## config.ini:
 ```ini
 [main]
 amqpuri = amqp://user:pas@host:port
